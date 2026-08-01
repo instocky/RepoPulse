@@ -19,10 +19,18 @@ will land in tickets 02–14.
 
 ```bash
 # Requires Python 3.11+ and uv
-uv sync
+uv sync --extra dev   # installs pytest + respx for the test runner
 cp .env.example .env  # then fill in GITHUB_TOKEN
-python -c "import repo_pulse; print(repo_pulse.__version__)"
+uv run python -c "import repo_pulse; print(repo_pulse.__version__)"
+uv run pytest -q      # smoke-check: 6 passed
 ```
+
+The `--extra dev` is required because `pytest` / `respx` / `ruff` live in
+`[project.optional-dependencies].dev`, not in the runtime `dependencies`
+list — a plain `uv sync` on a clean clone would install the package but
+not the test runner, so the documented smoke-check would fail. The
+extras are the conventional way to keep test-only deps out of the
+runtime `repo-pulse` install on the VPS.
 
 ## Architecture
 
