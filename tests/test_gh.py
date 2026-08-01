@@ -90,11 +90,6 @@ def _config(tmp_path: Path, *, token: str = "ghp_test_token") -> Config:
     return load_config(env_path=env, toml_path=toml)
 
 
-def _client(config: Config, *, backoffs: tuple[float, ...] = _ZERO_BACKOFFS) -> GitHubClient:
-    """Build a Client with test backoffs."""
-    return GitHubClient(config, retry_backoffs=backoffs)
-
-
 def _fast_client(
     config: Config,
     rmock: respx.MockRouter,
@@ -124,16 +119,16 @@ def _fast_client(
     # router's handler. Bypasses the default transport (which on
     # Windows takes ~800 ms to bootstrap the SSL trust store).
     # The respx routes are still the source of truth for which
-    # URLs match which responses.
+    # URLs match which responses. The headers come from the
+    # production ``_default_headers`` helper so a future header
+    # change in production automatically applies here — no risk
+    # of the test Client silently disagreeing with production.
     fast = httpx.MockTransport(rmock.handler)
+    from repo_pulse.gh import _default_headers
+
     fast_client = httpx.Client(
         base_url=str(client.base_url),
-        headers={
-            "Authorization": f"Bearer {config.github_token}",
-            "User-Agent": f"repo-pulse/{__version__}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=_default_headers(config.github_token),
         trust_env=False,
         timeout=httpx.Timeout(30.0, connect=10.0),
         transport=fast,
@@ -180,12 +175,18 @@ def test_fetch_latest_release_returns_dict_when_release_exists(tmp_path: Path) -
     assert result == release
 
 
-def test_fetch_latest_release_returns_none_on_404(tmp_path: Path) -> None:
+def test_fetch_latest_release_returns_none_on_404(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """A repo with no releases returns 404; the client surfaces ``None``.
 
     The Collector treats "no release" as a normal condition (not a
-    failure) and writes ``NULL`` for ``latest_release_at``; the client
-    must not raise or log an error in that case.
+    failure) and writes ``NULL`` for ``latest_release_at``; the
+    client must not raise. The 404 is still logged (per the
+    ticket's "fails fast and logs structured warning" line) but
+    at ``INFO`` not ``WARNING`` — see the module docstring of
+    ``fetch_latest_release`` for why this endpoint has a
+    different log level than the generic 4xx path.
     """
     config = _config(tmp_path)
     with respx.mock(base_url="https://api.github.com") as rmock:
@@ -193,9 +194,22 @@ def test_fetch_latest_release_returns_none_on_404(tmp_path: Path) -> None:
             return_value=httpx.Response(404, json={"message": "Not Found"})
         )
         client = _fast_client(config, rmock)
-        result = client.fetch_latest_release("owner", "name")
+        with caplog.at_level("INFO", logger="repo_pulse.gh"):
+            result = client.fetch_latest_release("owner", "name")
 
     assert result is None
+    # The 404 was logged (not silently swallowed). INFO, not
+    # WARNING, because "no release yet" is a normal state, not
+    # an operator signal. The ``no_release=True`` extra on the
+    # log record lets a structured formatter filter these out
+    # of the operator's alert feed.
+    info_records = [r for r in caplog.records if r.levelname == "INFO"]
+    assert any("404" in r.message for r in info_records), (
+        "expected an INFO log mentioning 404 for the no-release case"
+    )
+    assert not any(r.levelname == "WARNING" and "404" in r.message for r in caplog.records), (
+        "404 on releases/latest must NOT log at WARNING"
+    )
 
 
 def test_fetch_starred_returns_full_list_single_page(tmp_path: Path) -> None:
@@ -642,44 +656,9 @@ def test_client_context_manager_closes_transport(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Layer contract — the gh module respects 00-architecture doctrine
-# ---------------------------------------------------------------------------
-
-
-def test_gh_module_does_not_import_collector_or_db() -> None:
-    """Regression net for 00-architecture: ``gh`` is a leaf primitive
-    and must not import from higher layers (collector, db, analytics,
-    web, charts). The enforcer in ``test_architecture.py`` catches
-    this; this test exists for the explicit "the gh module does
-    not pull in the database adapter" signal during refactors.
-    """
-    import repo_pulse.gh as gh_module
-
-    # These are the *layer* names from the doctrine. A leaf must not
-    # import any of them — but importing ``Config`` from ``config``
-    # is the documented exception, so the assertion only covers
-    # *higher* layers.
-    forbidden = {"collector", "db", "analytics", "charts", "web"}
-    module_file = gh_module.__file__
-    assert module_file is not None
-    src = Path(module_file).read_text(encoding="utf-8")
-    for _layer in forbidden:
-        # We do an AST check, not a text grep, so a literal string
-        # like ``# db`` in a comment does not trip the test.
-        import ast
-
-        tree = ast.parse(src)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                if node.module and node.module.split(".")[0] == "repo_pulse":
-                    # Resolve the target (relative or absolute).
-                    parts = (node.module or "").split(".")
-                    if node.level:
-                        # Relative — resolve against gh/__init__.py.
-                        # gh lives at parts[1] of the package, so
-                        # ``from .X import Y`` is layer X.
-                        target_layer = parts[1] if len(parts) > 1 else None
-                    else:
-                        target_layer = parts[1] if len(parts) > 1 else None
-                    if target_layer in forbidden:
-                        pytest.fail(f"gh layer imports forbidden layer {target_layer!r}")
+# Layer contract — the gh module respects 00-architecture doctrine.
+# The architecture enforcer in ``tests/test_architecture.py`` (the
+# symmetric ``gh → {collector, db, analytics, charts, web}`` pairs
+# plus ``test_enforcer_catches_gh_importing_db``) is the
+# authoritative check; a separate per-file test here would just
+# duplicate that AST walk with weaker coverage.

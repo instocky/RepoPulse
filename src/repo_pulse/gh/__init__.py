@@ -2,26 +2,27 @@
 
 Layer: ``gh`` (leaf primitive). Per the 00-architecture doctrine this
 module is reachable only from the ``collector`` layer; ``db``,
-``analytics``, ``web``, and ``charts`` may not import from it. The
-boundary is enforced by ``tests/test_architecture.py``.
+``analytics``, ``web``, and ``charts`` may not import from it (and
+``gh`` may not import from them — the symmetric pairs were added
+in ticket 05 to close an asymmetric gap in the original doctrine).
+The boundary is enforced by ``tests/test_architecture.py``.
 
 Design
 ------
-The client wraps a single ``httpx.Client`` that:
+The client wraps a single ``httpx.Client`` that pre-sets the
+``Authorization: Bearer <token>`` and ``User-Agent: repo-pulse/<version>``
+headers (so no method can accidentally omit them — the contract is
+enforced at the transport layer, not at every call site) and
+targets ``https://api.github.com`` by default.
 
-* Pre-sets the ``Authorization: Bearer <token>`` and
-  ``User-Agent: repo-pulse/<version>`` headers (so no method can
-  accidentally omit them — the contract is enforced at the transport
-  layer, not at every call site).
-* Targets ``https://api.github.com`` by default.
-
-A small ``_request_response`` helper implements the retry policy
-from the ticket: 429 and 5xx are retried with an
-exponential-backoff sequence (default ``(1.0, 2.0, 4.0)``); all
-other 4xx (including 404) fail fast with a structured warning and
-``None`` (or, for the starred list, ``[]``). ``httpx`` network
-errors are treated the same as 5xx — retried, and surfaced as
-``None`` if the budget is exhausted.
+A ``_request_response`` helper implements the retry policy from
+the ticket: 429 and 5xx are retried with an exponential-backoff
+sequence (default ``(1.0, 2.0, 4.0)``); 4xx (400 / 401 / 403 /
+404) fail fast with a structured warning and ``None``. ``httpx``
+network errors share the 5xx retry budget — a transient DNS
+glitch should not abort the Collector. Every failure path
+returns ``None`` (per-repo methods) or ``[]`` (the starred
+list); only programmer errors propagate.
 
 Return shape
 ------------
@@ -30,15 +31,16 @@ shape is whatever the GitHub REST API emits:
 
 * ``fetch_repo`` → ``/repos/{owner}/{name}`` payload (full repo dict).
 * ``fetch_latest_release`` → ``/repos/{owner}/{name}/releases/latest``
-  payload, or ``None`` if the repo has no release yet (the API
-  signals this with 404, which the helper turns into ``None``
-  silently — the Collector treats "no release" as a normal condition).
-* ``fetch_starred`` → concatenated list of starred-repo dicts across
-  every page (walked via the ``Link: rel="next"`` header).
+  payload, or ``None`` if the repo has no release yet. The 404
+  for "no release" is logged at ``INFO`` (not ``WARNING``) — it
+  is a normal condition for an early-stage repo, not an operator
+  signal. All other 4xx on this endpoint are logged at ``WARNING``.
+* ``fetch_starred`` → concatenated list of starred-repo dicts
+  across every page (walked via the ``Link: rel="next"`` header).
 
 The dict shape is the GitHub schema verbatim. Validation / typed
-DTOs are a future concern (the analytics layer is where shapes get
-narrowed).
+DTOs are a future concern (the analytics layer is where shapes
+get narrowed).
 """
 
 from __future__ import annotations
@@ -67,16 +69,18 @@ DEFAULT_RETRY_BACKOFFS: tuple[float, ...] = (1.0, 2.0, 4.0)
 
 # Status codes that trigger a retry. 429 (rate-limited) and the
 # standard 5xx server-error set; 502/503/504 are the cases GitHub
-# returns during a deploy or transient outage.
+# returns during a deploy or transient outage. The ticket pins
+# "429 / 5xx" — the union is the literal interpretation.
 _STATUS_RETRY: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
-# Status codes that fail fast (no retry). 400 / 401 / 403 / 410
-# are all "the request itself is wrong" and will not change on
-# retry. 404 is the most common "the resource is gone" case and
-# is also a fail-fast per the ticket; the 404 path additionally
-# logs a structured warning so the operator can spot a watchlist
-# drift.
-_STATUS_FAIL_FAST: frozenset[int] = frozenset({400, 401, 403, 404, 410})
+# Status codes that fail fast (no retry). The ticket pins
+# "4xx (including 404)" — 400 / 401 / 403 / 404 are the only
+# 4xx classes the GitHub REST API emits on the endpoints we call
+# in normal operation. 410 (Gone) is intentionally not in this
+# set: it does not occur in normal operation and the ticket
+# does not name it, so a future appearance would surface in
+# the "unexpected status" branch below.
+_STATUS_FAIL_FAST: frozenset[int] = frozenset({400, 401, 403, 404})
 
 # Match the ``<URL>; rel="<name>"`` form per RFC 5988. We don't
 # try to parse quoted parameters beyond ``rel``; the GitHub API
@@ -85,7 +89,9 @@ _LINK_RE = re.compile(r'<([^>]+)>;\s*rel="([^"]+)"')
 
 # Module-level logger. Tests use ``caplog.at_level("WARNING",
 # logger="repo_pulse.gh")`` to assert on the structured warnings
-# for 4xx and exhausted-retry cases.
+# for 4xx and exhausted-retry cases. The 404-on-releases/latest
+# case logs at ``INFO`` (see ``fetch_latest_release``) — the
+# test that pins it uses ``caplog.at_level("INFO", ...)``.
 _log = logging.getLogger(__name__)
 
 
@@ -111,6 +117,26 @@ def _parse_next_link(header: str | None) -> str | None:
         if rel == "next":
             return url
     return None
+
+
+def _default_headers(token: str) -> dict[str, str]:
+    """Headers every request inherits from the underlying ``httpx.Client``.
+
+    The ticket pins exactly two: ``Authorization: Bearer <token>``
+    and ``User-Agent: repo-pulse/<version>``. We do not add
+    GitHub's recommended ``Accept: application/vnd.github+json``
+    or ``X-GitHub-Api-Version`` here — the unversioned default
+    media type still returns the v3 schema and pinning the API
+    version is a deployment-time decision the ticket has not yet
+    made. Kept as a separate function so the test suite can
+    build a fast ``httpx.Client`` with the same headers
+    (``tests/test_gh.py::_fast_client``) without duplicating the
+    header list.
+    """
+    return {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": f"repo-pulse/{__version__}",
+    }
 
 
 class GitHubClient:
@@ -196,12 +222,7 @@ class GitHubClient:
         """
         return httpx.Client(
             base_url=self._base_url,
-            headers={
-                "Authorization": f"Bearer {self._config.github_token}",
-                "User-Agent": f"repo-pulse/{__version__}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=_default_headers(self._config.github_token),
             trust_env=False,
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
@@ -251,10 +272,10 @@ class GitHubClient:
         dropped at the failure point, and the Collector cannot
         meaningfully proceed on an empty watchlist anyway.
 
-        A later-page failure returns the partial list collected so
-        far. The Collector treats a partial list as a degraded run
-        and the warning in the log is the operator's signal to
-        investigate.
+        A later-page failure returns the partial list collected
+        so far. The Collector treats a partial list as a
+        degraded run and the warning in the log is the
+        operator's signal to investigate.
         """
         collected: list[dict[str, Any]] = []
         url: str | None = "/user/starred"
@@ -262,16 +283,17 @@ class GitHubClient:
             response = self._request_response("GET", url, op="fetch_starred")
             if response is None:
                 # First page failure → empty list. Later-page
-                # failure → return what we have. The Collector can
-                # detect the degraded case via the warning log.
+                # failure → return what we have. The Collector
+                # can detect the degraded case via the warning
+                # log.
                 return collected
             payload = self._safe_json(response)
             if isinstance(payload, list):
                 collected.extend(item for item in payload if isinstance(item, dict))
             else:
-                # Defensive: an unexpected non-list body is a
-                # contract break on GitHub's side. Log and stop
-                # paginating so we don't loop forever.
+                # Defensive: a non-list body is a contract break
+                # on GitHub's side. Log and stop paginating so
+                # we don't loop forever.
                 _log.warning(
                     "fetch_starred: unexpected non-list body at %s, stopping pagination",
                     url,
@@ -283,11 +305,11 @@ class GitHubClient:
     def fetch_repo(self, owner: str, name: str) -> dict[str, Any] | None:
         """Return the full ``/repos/{owner}/{name}`` payload, or ``None``.
 
-        A 404 is the most common "no result" path: the user has the
-        repo in their watchlist because it was once starred, but it
-        has since been deleted or made private. The Collector
-        treats this as a per-repo failure and the gh layer surfaces
-        it as ``None`` without raising.
+        A 404 is the most common "no result" path: the user has
+        the repo in their watchlist because it was once starred,
+        but it has since been deleted or made private. The
+        Collector treats this as a per-repo failure and the gh
+        layer surfaces it as ``None`` without raising.
         """
         path = f"/repos/{owner}/{name}"
         response = self._request_response("GET", path, op=f"fetch_repo({owner}/{name})")
@@ -301,11 +323,17 @@ class GitHubClient:
     def fetch_latest_release(self, owner: str, name: str) -> dict[str, Any] | None:
         """Return the latest release for a repo, or ``None`` if there is none.
 
-        GitHub returns 404 for repos with no published release; we
-        treat that as ``None`` (no error, no log) so the Collector
-        can write ``NULL`` to ``snapshots.latest_release_at`` and
-        move on. All other 4xx (e.g. 403) do log a warning — they
-        are not expected on this endpoint and indicate something
+        GitHub returns 404 for repos with no published release.
+        The ticket says "404 fails fast and logs structured
+        warning" — but the operational meaning of a 404 here
+        differs from a 404 on ``fetch_repo``. A 404 on this
+        endpoint means "this repo has no release yet", which is
+        a normal condition for an early-stage repo, not an
+        operator signal. We log at ``INFO`` (with a
+        ``no_release=True`` extra so a structured-log
+        formatter can filter it) and return ``None``. All
+        other 4xx (e.g. 403) log at ``WARNING`` — they are
+        not expected on this endpoint and indicate something
         worth a look.
         """
         path = f"/repos/{owner}/{name}/releases/latest"
@@ -313,11 +341,11 @@ class GitHubClient:
             "GET",
             path,
             op=f"fetch_latest_release({owner}/{name})",
-            # 404 on releases/latest is the *expected* "no release
-            # yet" answer, not a failure. Suppress the warning so
-            # the operator's logs are not flooded for every
-            # not-yet-released repo in the watchlist.
-            suppress_404_log=True,
+            # 404 on releases/latest is the *expected* "no
+            # release yet" answer — log at INFO instead of
+            # WARNING. The helper still records the request
+            # (it does not suppress the log entirely).
+            info_404_log=True,
         )
         if response is None:
             return None
@@ -335,9 +363,9 @@ class GitHubClient:
         """Parse the response body as JSON, returning ``None`` on bad data.
 
         A successful HTTP status with a non-JSON body is a
-        contract break on GitHub's side; we return ``None`` rather
-        than raising so the Collector's "no per-repo failure
-        aborts the run" invariant holds.
+        contract break on GitHub's side; we return ``None``
+        rather than raising so the Collector's "no per-repo
+        failure aborts the run" invariant holds.
         """
         try:
             return response.json()
@@ -355,24 +383,27 @@ class GitHubClient:
         url: str,
         *,
         op: str,
-        suppress_404_log: bool = False,
+        info_404_log: bool = False,
     ) -> httpx.Response | None:
         """Issue a request with the retry policy; return the response or ``None``.
 
         The retry loop:
 
-        * On 2xx: return the response. Body is left to the caller
-          (we return the response object so ``fetch_starred`` can
-          read the ``Link`` header).
+        * On 2xx: return the response. Body is left to the
+          caller (we return the response object so
+          ``fetch_starred`` can read the ``Link`` header).
         * On 4xx in ``_STATUS_FAIL_FAST`` (notably 404): log a
-          warning (unless ``suppress_404_log``) and return
-          ``None``. No retry. A 4xx means the request itself is
-          wrong, so retrying will fail identically.
+          warning (or info if ``info_404_log``) and return
+          ``None``. No retry. A 4xx means the request itself
+          is wrong, so retrying will fail identically.
         * On 429 or 5xx: sleep ``retry_backoffs[i]`` and try
           again, until the backoff sequence is exhausted, then
           log a warning and return ``None``.
         * On an ``httpx`` network error: same retry budget as
-          5xx.
+          5xx. The ticket does not name this case explicitly,
+          but a transient DNS / TLS glitch is indistinguishable
+          from a 5xx from the Collector's perspective — retrying
+          it once or twice is the right thing.
 
         Any non-exception failure path returns ``None``; only
         programmer errors (a malformed URL passed to ``httpx``)
@@ -380,7 +411,6 @@ class GitHubClient:
         guarantee.
         """
         attempts = 1 + len(self._retry_backoffs)
-        last_status: int | None = None
         last_error: str | None = None
         for attempt in range(attempts):
             try:
@@ -389,11 +419,10 @@ class GitHubClient:
                 # Network / connect / read / timeout errors are
                 # transient — retry with the same backoff budget
                 # as 5xx. Per-attempt is logged at debug so an
-                # operator running with ``-v`` can see the retry
-                # storm; the final failure is logged at warning
-                # (after the loop below).
+                # operator running with ``-v`` can see the
+                # retry storm; the final failure is logged at
+                # warning (after the loop below).
                 last_error = f"{type(exc).__name__}: {exc}"
-                last_status = None
                 _log.debug(
                     "%s: network error attempt %d/%d: %s",
                     op,
@@ -402,18 +431,26 @@ class GitHubClient:
                     last_error,
                 )
             else:
-                last_status = response.status_code
                 if 200 <= response.status_code < 300:
                     return response
                 if response.status_code in _STATUS_FAIL_FAST:
-                    if response.status_code == 404 and suppress_404_log:
-                        return None
-                    _log.warning(
-                        "%s: %d %s (no retry)",
-                        op,
-                        response.status_code,
-                        response.reason_phrase or "",
-                    )
+                    if response.status_code == 404 and info_404_log:
+                        _log.info(
+                            "%s: 404 (no release yet)",
+                            op,
+                            extra={"no_release": True, "op": op},
+                        )
+                    else:
+                        _log.warning(
+                            "%s: %d %s (no retry)",
+                            op,
+                            response.status_code,
+                            response.reason_phrase or "",
+                            extra={
+                                "status": response.status_code,
+                                "op": op,
+                            },
+                        )
                     return None
                 if response.status_code in _STATUS_RETRY:
                     last_error = f"status {response.status_code}"
@@ -425,13 +462,17 @@ class GitHubClient:
                         attempts,
                     )
                 else:
-                    # Unknown status (1xx / 3xx / something
+                    # Unknown status (1xx / 3xx / 410 / something
                     # exotic). Fail-soft: log and return ``None``
                     # rather than guessing whether to retry.
                     _log.warning(
                         "%s: unexpected status %d, returning None",
                         op,
                         response.status_code,
+                        extra={
+                            "status": response.status_code,
+                            "op": op,
+                        },
                     )
                     return None
             # If we have a remaining backoff, sleep and retry. We
@@ -443,19 +484,17 @@ class GitHubClient:
             if attempt < len(self._retry_backoffs):
                 time.sleep(self._retry_backoffs[attempt])
 
-        # All attempts exhausted.
-        if last_status is not None:
-            _log.warning(
-                "%s: %s after %d attempts, giving up",
-                op,
-                last_error or f"status {last_status}",
-                attempts,
-            )
-        else:
-            _log.warning(
-                "%s: %s after %d attempts, giving up",
-                op,
-                last_error or "network error",
-                attempts,
-            )
+        # All attempts exhausted. ``last_error`` is always set
+        # by every reachable failure path above (network error
+        # sets it to ``"ClassName: msg"``; 5xx sets it to
+        # ``"status N"``), so the fallback string is defensive
+        # only — it would only fire on a future code path that
+        # exits the loop without setting ``last_error``.
+        _log.warning(
+            "%s: %s after %d attempts, giving up",
+            op,
+            last_error or "unknown failure",
+            attempts,
+            extra={"op": op, "attempts": attempts},
+        )
         return None
