@@ -16,3 +16,6 @@
 - [ ] Golden-file tests assert on key substrings of the rendered HTML: title appears, data values appear, no Plotly-specific terms leak
 - [ ] Tests cover: each chart kind with known data, empty data (edge case), single-point series
 - [ ] No IO; no file writes
+
+
+Respects 00-architecture doctrine

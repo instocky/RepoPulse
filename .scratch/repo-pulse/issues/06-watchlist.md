@@ -15,3 +15,6 @@
 - [ ] Function is pure: no IO, no DB, no logging
 - [ ] Tests cover boundary cases: exactly 12mo, 12mo+1s, 11mo+30d, missing pushed_at, archived=true, archived=false, disabled=true
 - [ ] Tests use frozen `datetime` instances; no real time dependency
+
+
+Respects 00-architecture doctrine

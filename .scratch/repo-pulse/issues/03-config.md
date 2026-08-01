@@ -15,3 +15,6 @@
 - [ ] Tests cover: missing env, partial config, full config, no config.toml, invalid toml
 - [ ] `python-dotenv` reads `.env` directly (memory note: copy right-hand side of `=` only, no type annotations)
 - [ ] Service-helper pattern: helpers accept `path: Path | None = None` and read env internally (per agent memory)
+
+
+Respects 00-architecture doctrine

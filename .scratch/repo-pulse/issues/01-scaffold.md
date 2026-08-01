@@ -15,3 +15,6 @@
 - [ ] `uv sync` succeeds in a clean clone
 - [ ] `python -c "import repo_pulse"` succeeds
 - [ ] `pytest` runs (no tests yet, but the runner works)
+
+
+Respects 00-architecture doctrine

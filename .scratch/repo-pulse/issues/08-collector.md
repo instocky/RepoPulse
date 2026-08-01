@@ -20,3 +20,6 @@
 - [ ] Tests use mocked `gh` (return canned data) and in-memory `db`
 - [ ] Tests cover: happy path with 3 repos, 2 repos skipped due to 404, 1 repo with 500 (retry then skip), lock contention, watchlist transition (3 in last, 2 in this — 1 marked inactive)
 - [ ] The Collector never invokes viral detection (per ADR 0003 — that's analytics' job)
+
+
+Respects 00-architecture doctrine

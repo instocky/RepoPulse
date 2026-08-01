@@ -17,3 +17,6 @@
 - [ ] Tests use `typer.testing.CliRunner`
 - [ ] Tests cover: each subcommand happy path, snapshot with --date flag, status with empty DB
 - [ ] The CLI does NOT take the PAT as an argument — it reads from config (which reads from `.env`)
+
+
+Respects 00-architecture doctrine

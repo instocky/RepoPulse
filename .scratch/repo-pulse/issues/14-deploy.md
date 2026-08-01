@@ -26,3 +26,6 @@
 - [ ] All paths in the systemd units are absolute (per agent memory: subprocess on Windows inherits `os.environ`; for systemd, we set `EnvironmentFile=/opt/repo-pulse/.env` and explicit `WorkingDirectory=`)
 - [ ] `deploy/README.md` notes that the `.env` must be readable by the systemd user (and that on many distros the `www-data` user is fine; on others a dedicated `repo-pulse` user is cleaner)
 - [ ] Ticket is a "doc" deliverable — no code, but the doc must be precise enough that a sysadmin can follow it without asking questions
+
+
+Respects 00-architecture doctrine

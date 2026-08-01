@@ -20,3 +20,6 @@
 - [ ] Tests assert on HTML structure (presence of expected `<h1>`, chart div, etc.) — not on internal calls
 - [ ] Tests cover: each route happy path, 404 for missing repo, 404 for unknown leaderboard kind, empty DB
 - [ ] No JS framework — just Plotly CDN + a few inline scripts for interactivity
+
+
+Respects 00-architecture doctrine

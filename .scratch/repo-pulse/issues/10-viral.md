@@ -17,3 +17,6 @@
 - [ ] The Collector never imports or calls `detect_viral` (per ADR 0003)
 - [ ] Viral status is computed at read time in `analytics.get_viral_events` — never persisted on the snapshot row
 - [ ] If config thresholds change, re-reading the same DB produces a different viral feed (no re-collection)
+
+
+Respects 00-architecture doctrine

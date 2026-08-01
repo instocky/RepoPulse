@@ -23,4 +23,4 @@
 - [ ] Tests seed in-memory DB with synthetic snapshots covering 30+ days and 10+ repos
 - [ ] Tests assert on DTO shape (attribute equality, hashability); never on dict keys or row positions
 - [ ] Tests cover each leaderboard kind against known seed data
-- [ ] Respects 00-architecture doctrine (Analytics is a leaf above Storage; no upward imports)
+Respects 00-architecture doctrine
