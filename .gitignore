@@ -35,6 +35,7 @@ ENV/
 
 # === Testing ===
 .pytest_cache/
+.pytest*/
 .coverage
 .coverage.*
 htmlcov/
