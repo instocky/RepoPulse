@@ -1,0 +1,64 @@
+# === Личное (не для публичного репо) ===
+notes.md
+.env
+tmp/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# === Virtual environments ===
+.venv/
+venv/
+env/
+ENV/
+
+# === Testing ===
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.tox/
+tests/fixtures/
+
+# === Type checkers ===
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# === Linters / Formatters ===
+.ruff_cache/
+
+# === IDEs ===
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# === OS ===
+Thumbs.db
