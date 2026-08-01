@@ -134,9 +134,11 @@ def _repo_dict(
 def _full_snapshot_fields() -> dict[str, Any]:
     """The 12 ``fields`` keys ``write_snapshot`` accepts, with values.
 
-    The ticket requires "all 22 snapshot fields per spec" — this
-    helper fills every schema column in the ``snapshots`` table so
-    the field-coverage test can assert on every persisted value.
+    Fills every column in the ``snapshots`` table so the
+    field-coverage test can assert on every persisted value
+    (see ``test_write_snapshot_persists_all_spec_columns``).
+    The ``repositories`` columns are exercised separately by the
+    ``upsert_repository`` tests.
     """
     return {
         "stars": 100,
@@ -586,9 +588,10 @@ def test_get_repository_returns_none_for_missing() -> None:
 
 def test_write_snapshot_persists_all_spec_columns() -> None:
     """All 12 ``fields`` keys land in their schema column with the
-    values passed in. The ticket requires "all 22 snapshot fields
-    per spec (not just the original 8)" — this is the contract
-    that future refactors cannot trim without breaking the test."""
+    values passed in. This is the contract that future refactors
+    cannot trim without breaking the test — every column of the
+    ``snapshots`` table is asserted explicitly, not just a
+    representative subset."""
     db = _new_db()
     db.upsert_repository(_repo_dict(full_name="owner/r"), TODAY, in_watchlist=True)
     db.write_snapshot("owner/r", TODAY, _full_snapshot_fields())
