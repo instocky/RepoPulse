@@ -587,6 +587,25 @@ def test_upsert_topics_empty_list_is_a_noop() -> None:
     assert _scalar(db, "SELECT COUNT(*) FROM repository_topics") == 0
 
 
+def test_upsert_topics_duplicate_names_in_list_yield_single_row_and_link() -> None:
+    """Duplicate names within a single call collapse to one
+    topic row and one link — the GitHub ``/repos/{owner}/{repo}/topics``
+    endpoint can return the same name twice under a backend
+    race, and the Collector passes the list through verbatim.
+
+    Pinned here because the implementation uses
+    ``INSERT OR IGNORE`` per topic in a Python ``for`` loop;
+    a future refactor to ``executemany`` or a bulk insert
+    must preserve the dedup contract — the spec is "one row
+    per unique name", not "one row per name in the list"."""
+    db = _new_db()
+    db.upsert_repository(_repo_dict(full_name="owner/r"), TODAY, in_watchlist=True)
+    db.upsert_topics("owner/r", ["ai", "ai", "ai", "agents", "agents"])
+
+    assert _scalar(db, "SELECT COUNT(*) FROM topics") == 2
+    assert _scalar(db, "SELECT COUNT(*) FROM repository_topics") == 2
+
+
 # ---------------------------------------------------------------------------
 # get_previous_snapshot
 # ---------------------------------------------------------------------------

@@ -636,23 +636,37 @@ class Database:
 
     @staticmethod
     def _coerce_bool_int(value: Any) -> int:
-        """Coerce a Python ``bool`` to SQLite's ``0`` / ``1``.
+        """Coerce a Python ``bool`` (or ``0`` / ``1``) to SQLite's integer.
 
         The schema stores ``archived`` / ``disabled`` as
         ``INTEGER NOT NULL DEFAULT 0``. A Python ``True`` would
         bind to ``1`` automatically (sqlite3 maps ``bool`` to
-        ``int``), but ``None`` and unknown shapes would bind to
-        ``NULL`` and violate the constraint. An explicit
-        ``isinstance`` check is the cheapest way to keep the
-        layer total on whatever upstream passes.
+        ``int``), but unknown shapes would bind to ``NULL`` and
+        violate the constraint, or — worse — silently bind to a
+        wrong integer and corrupt a downstream filter. ``None``
+        is the GitHub-API-returns-null case; everything else is
+        an upstream bug and must surface as a clear error.
+
+        The ``isinstance(value, bool)`` check MUST come first:
+        ``bool`` is a subclass of ``int`` in Python, so a plain
+        ``isinstance(value, int)`` would accept ``True`` / ``False``
+        and skip the explicit ``1 if value else 0`` branch —
+        harmless here, but a refactor target. The order is
+        pinned in the test ``test_upsert_repository_archived_and_disabled_coerce_bool_to_int``.
         """
         if isinstance(value, bool):
             return 1 if value else 0
         if isinstance(value, int):
             return value
-        # Anything else (None, str, …) is treated as 0 — the
-        # default. A non-bool, non-int value here is almost
-        # certainly an upstream mistake, but the Collector
-        # never sees that shape, so we keep the behaviour
-        # permissive rather than raising.
-        return 0
+        if value is None:
+            # GitHub's API can return ``null`` for ``archived``
+            # / ``disabled`` on a malformed payload. Coerce to 0
+            # (the schema default) rather than violating the
+            # NOT NULL constraint — losing the "is archived"
+            # signal is recoverable, a hard error would abort
+            # the Collector run for one bad row.
+            return 0
+        raise TypeError(
+            f"expected bool, int, or None for archived/disabled; "
+            f"got {type(value).__name__}: {value!r}"
+        )
