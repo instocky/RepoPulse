@@ -1,0 +1,94 @@
+# Repo-Pulse — CI
+#
+# Lint, type-check, and test on every push to main and every pull request
+# targeting main. Branch protection on main should require all three jobs
+# before merge.
+#
+# Tickets: 02 (this file) wires the workflow. Deploy lands in ticket 14
+# as a separate, manual workflow — there is intentionally no deploy step
+# here. The architecture-doctrine test from ticket 00 is picked up by the
+# `pytest -q` step (it lives in tests/test_architecture.py).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel a previous run of the same branch / PR when a new commit
+# lands. Saves CI minutes on force-pushes and rapid fix-up commits;
+# the required checks on `main` branch protection are the source of
+# truth, not the in-flight status checks.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v1
+        with:
+          # Pin to the project's minimum supported Python so a future
+          # upgrade (e.g. to 3.12) is a deliberate pyproject change,
+          # not a silent CI drift.
+          python-version: "3.11"
+          # Caches ~/.cache/uv keyed on uv.lock so warm runs skip the
+          # package download. Typical warm run on this scaffold: <30s.
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Sync dependencies (with dev extras for ruff)
+        # `--locked` is non-negotiable for CI: a stale uv.lock must fail
+        # the build (and surface the regeneration step) rather than be
+        # silently rewritten by the runner against pyproject.toml.
+        run: uv sync --extra dev --locked
+      - name: Lint
+        run: uv run ruff check .
+
+  typecheck:
+    name: mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v1
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Sync dependencies (with dev extras for mypy)
+        # `--locked` is non-negotiable for CI: a stale uv.lock must fail
+        # the build (and surface the regeneration step) rather than be
+        # silently rewritten by the runner against pyproject.toml.
+        run: uv sync --extra dev --locked
+      - name: Type-check src/
+        # Strict on src/repo_pulse/, lenient on tests/ — see [tool.mypy]
+        # in pyproject.toml. `mypy src/` enforces the contract on the
+        # production code only; tests are checked when devs run mypy
+        # locally against the whole tree.
+        run: uv run mypy src/
+
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v1
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Sync dependencies (with dev extras for pytest + respx)
+        # `--locked` is non-negotiable for CI: a stale uv.lock must fail
+        # the build (and surface the regeneration step) rather than be
+        # silently rewritten by the runner against pyproject.toml.
+        run: uv sync --extra dev --locked
+      - name: Test
+        # The architecture-doctrine test from ticket 00 is part of the
+        # suite, so a forbidden cross-layer import fails the build here.
+        run: uv run pytest -q

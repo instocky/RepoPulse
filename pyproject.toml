@@ -27,6 +27,7 @@ dev = [
     "pytest>=8.0,<9.0",
     "respx>=0.21,<1.0",          # httpx mock transport for gh tests
     "ruff>=0.5,<1.0",            # linter / formatter
+    "mypy>=1.10,<2.0",           # static type checker (CI)
 ]
 
 # NOTE: `[project.scripts]` is intentionally NOT declared here yet. The
@@ -63,6 +64,27 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["B011"]  # `assert False` is fine in tests
+
+# ---------------------------------------------------------------------------
+# Static type checking
+# ---------------------------------------------------------------------------
+# Strict on the production source under src/repo_pulse/; lenient on tests.
+# Tests are a place for fixtures, monkey-patching, and ad-hoc helpers —
+# strict typing on them slows the TDD cycle without changing ship behavior.
+# If a future third-party dep ships without full stubs, add a per-module
+# override below rather than weakening strictness globally.
+[tool.mypy]
+python_version = "3.11"
+strict = true
+# CI invokes `mypy src/`, so the tests/ override is documentation + a guard
+# for a developer running `mypy` against the whole repo locally.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+check_untyped_defs = false
+no_implicit_optional = false
+warn_return_any = false
+warn_unused_ignores = false
 
 # ---------------------------------------------------------------------------
 # Test runner
