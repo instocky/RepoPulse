@@ -246,25 +246,25 @@ def test_context_manager_releases_on_exception(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Atomicity / tmp-file hygiene (fresh-acquire path)
+# Atomicity — the lock file is created in a single syscall
 # ---------------------------------------------------------------------------
 
 
-def test_no_tmp_file_lingers_after_successful_acquire(tmp_path: Path) -> None:
-    """A successful acquire must not leave a ``.tmp.<pid>`` file behind.
-
-    The tmp file is the "write to tmp, rename" staging area; if the
-    rename succeeded it must be gone, and the final lock file must
-    contain our PID."""
-    lock_path = tmp_path / "tmp_hygiene_ok.lock"
+def test_lock_directory_has_no_extraneous_files_after_acquire(
+    tmp_path: Path,
+) -> None:
+    """The atomic-create path (``O_CREAT | O_EXCL``) must not leave any
+    staging / tmp file behind. The lock file itself is the only
+    artifact of a successful acquire.
+    """
+    lock_path = tmp_path / "atomic_create.lock"
     lock = Lock(lock_path)
     assert lock.acquire() is True
     try:
-        # Look in the same directory as the lock file for any stray
-        # tmp staging. ``*.tmp.*`` would also match unrelated files
-        # (none expected in tmp_path, but be specific just in case).
-        siblings = [p for p in lock_path.parent.iterdir() if ".tmp." in p.name]
-        assert siblings == [], f"stray tmp file(s) left behind: {siblings}"
+        siblings = sorted(p.name for p in lock_path.parent.iterdir())
+        assert siblings == [lock_path.name], (
+            f"unexpected siblings in lock dir: {siblings}"
+        )
         assert lock_path.read_text(encoding="utf-8").strip() == str(os.getpid())
     finally:
         lock.release()

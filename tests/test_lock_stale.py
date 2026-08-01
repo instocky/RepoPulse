@@ -129,24 +129,26 @@ def test_acquire_takes_over_stale_lock(
 
 
 # ---------------------------------------------------------------------------
-# Atomicity / tmp-file hygiene on the stale-takeover path
+# Atomicity on the stale-takeover path
 # ---------------------------------------------------------------------------
 
 
-def test_no_tmp_file_lingers_after_stale_acquire(
+def test_stale_takeover_leaves_no_extraneous_files(
     tmp_path: Path, dead_pid_os_kill: int
 ) -> None:
-    """Stale-lock takeover follows the same tmp-then-rename path; same
-    hygiene guarantee: no ``.tmp.<pid>`` file is left behind in the
-    lock's parent directory after the rename."""
-    lock_path = tmp_path / "tmp_hygiene_stale.lock"
+    """Stale-lock takeover re-creates the file atomically; same
+    hygiene guarantee as a fresh acquire: the lock file is the only
+    artifact in its directory (no staging / tmp leftovers)."""
+    lock_path = tmp_path / "stale_takeover.lock"
     lock_path.write_text(str(dead_pid_os_kill), encoding="utf-8")
     lock = Lock(lock_path)
 
     assert lock.acquire() is True
     try:
-        siblings = [p for p in lock_path.parent.iterdir() if ".tmp." in p.name]
-        assert siblings == [], f"stray tmp file(s) left behind: {siblings}"
+        siblings = sorted(p.name for p in lock_path.parent.iterdir())
+        assert siblings == [lock_path.name], (
+            f"unexpected siblings after stale takeover: {siblings}"
+        )
     finally:
         lock.release()
 
