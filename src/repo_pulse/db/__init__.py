@@ -208,22 +208,39 @@ class Database:
     ) -> None:
         """Insert or update a single repository row.
 
-        On the first call for a ``full_name`` the row is created
-        with ``first_seen_date = last_seen_date = today`` and
-        ``in_watchlist`` from the parameter. On subsequent calls
-        every metadata field is refreshed, ``last_seen_date`` is
-        set to the new ``today``, and ``first_seen_date`` is
-        preserved — the ticket's "first_seen only on first
-        insert" rule.
+        ``first_seen_date`` semantics (per
+        ``docs/SPEC.md §Watchlist lifecycle``):
 
-        The ``in_watchlist`` flag is set from the keyword
+        * First insert (no prior row): ``first_seen_date = today``.
+        * Re-star (``in_watchlist`` transition 0→1): per the
+          spec, "Re-starring (manually by the user) is a fresh
+          entry: ``in_watchlist = 1`` again, ``first_seen_date``
+          reset." ``first_seen_date`` is reset to today.
+        * Continuous membership (1→1), unstar (1→0), and
+          re-upsert of an unstarred repo (0→0):
+          ``first_seen_date`` is preserved — it is the audit
+          anchor for "when did this repo first become known
+          to us?" and is not refreshed just because the
+          Collector saw the row again.
+
+        The reset is implemented atomically inside the UPSERT
+        via a ``CASE`` on the existing ``in_watchlist`` value
+        (``in_watchlist = 0 AND excluded.in_watchlist = 1``)
+        so the transition is decided by SQLite, not by a
+        Python-side ``SELECT … then INSERT or UPDATE`` round
+        trip. A Python-side check would race: a second
+        Collector run between the SELECT and the UPDATE could
+        observe an inconsistent intermediate state and write
+        the wrong ``first_seen_date``.
+
+        ``last_seen_date`` is set on every call to ``today``
+        — the Collector refreshes it each time the row is
+        observed, regardless of the watchlist transition.
+
+        The ``in_watchlist`` flag comes from the keyword
         argument rather than the dict so the Collector can
-        toggle a repo's membership without rebuilding the full
-        GitHub payload. A repo that was unstarred and re-starred
-        keeps its original ``first_seen_date`` — the ticket does
-        not ask for a reset on re-entry, and the spec's
-        "history preserved" rule says the original date is the
-        audit-relevant one.
+        toggle a repo's membership without rebuilding the
+        full GitHub payload.
 
         Parameters
         ----------
@@ -256,9 +273,10 @@ class Database:
             # ``INSERT ... ON CONFLICT DO UPDATE`` is SQLite's
             # native UPSERT. The first insert sets
             # ``first_seen_date`` to today; the update branch
-            # excludes it from the SET clause so the original
-            # value survives. ``last_seen_date`` and
-            # ``in_watchlist`` are refreshed on every call.
+            # resets it only on the 0→1 transition per the
+            # spec's watchlist lifecycle. ``last_seen_date``
+            # and ``in_watchlist`` are refreshed on every
+            # call.
             conn.execute(
                 """
                 INSERT INTO repositories (
@@ -276,6 +294,12 @@ class Database:
                     owner = excluded.owner,
                     name = excluded.name,
                     in_watchlist = excluded.in_watchlist,
+                    first_seen_date = CASE
+                        WHEN in_watchlist = 0
+                             AND excluded.in_watchlist = 1
+                            THEN excluded.first_seen_date
+                        ELSE first_seen_date
+                    END,
                     last_seen_date = excluded.last_seen_date,
                     description = excluded.description,
                     homepage = excluded.homepage,
@@ -495,18 +519,18 @@ class Database:
         return dict(row) if row is not None else None
 
     def list_watchlist(self) -> list[str]:
-        """Return every ``full_name`` with ``in_watchlist = 1``,
-        sorted alphabetically for deterministic output.
+        """Return every ``full_name`` with ``in_watchlist = 1``.
 
-        The sort is part of the public contract: the leaderboard
-        dispatch in Analytics (ticket 09) iterates the watchlist
-        in this order, and a non-deterministic order would make
-        flaky tests out of any "first repo" assertion.
+        The ticket's contract is "returns all ``full_name`` with
+        ``in_watchlist = 1``" — order is not specified, so this
+        layer does not impose one. The Analytics layer sorts
+        if it needs a deterministic iteration (e.g. a
+        leaderboard dispatch). Without ``ORDER BY`` SQLite's
+        output is implementation-defined; the test asserts on
+        a set to stay agnostic to the actual order.
         """
         rows = self._conn.execute(
-            "SELECT full_name FROM repositories "
-            "WHERE in_watchlist = 1 "
-            "ORDER BY full_name"
+            "SELECT full_name FROM repositories WHERE in_watchlist = 1"
         ).fetchall()
         return [r[0] for r in rows]
 

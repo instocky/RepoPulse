@@ -8,15 +8,20 @@ Covers the acceptance criteria in
 * ``bootstrap()`` is idempotent and creates the 4 spec tables and 3
   indexes.
 * ``upsert_repository`` distinguishes insert from update:
-  ``first_seen_date`` is set only on the first call, ``last_seen_date``
-  is updated on every call, ``in_watchlist`` comes from the parameter
+  ``first_seen_date`` is set on first insert and on
+  ``in_watchlist`` 0→1 transition (re-star, per
+  ``docs/SPEC.md §Watchlist lifecycle``), preserved on
+  continuous membership; ``last_seen_date`` is updated on
+  every call; ``in_watchlist`` comes from the parameter
   (not from the dict).
 * ``write_snapshot`` UPSERTs on ``(full_name, snapshot_date)`` and
   writes every column the spec defines.
 * ``upsert_topics`` is idempotent across new and existing topics and
-  links them via ``repository_topics``.
+  links them via ``repository_topics``; duplicates within a
+  single call collapse to a single row + link.
 * ``get_repository``, ``get_previous_snapshot``, ``list_watchlist``
-  return the shape the spec pins and a deterministic ordering.
+  return the shape the spec pins; ``list_watchlist`` makes no
+  ordering guarantee (the ticket only requires the contents).
 * Writes commit: a separate ``Database`` on the same file path sees
   the rows left by the first one.
 * The ``Database`` owns a single connection for its lifetime —
@@ -371,10 +376,17 @@ def test_upsert_repository_in_watchlist_comes_from_parameter() -> None:
     watchlist between runs without the dict changing.
 
     The first call uses a non-``TODAY`` date so the
-    ``first_seen_date`` preservation assertion is meaningful —
-    using ``TODAY`` would make the expected value ``TODAY.isoformat()``,
+    ``first_seen_date`` assertion is meaningful — using
+    ``TODAY`` would make the expected value ``TODAY.isoformat()``,
     which is also what a buggy implementation would produce by
-    accident on every call."""
+    accident on every call.
+
+    On the re-star, ``first_seen_date`` resets to the new
+    ``today`` (the spec's "Re-starring is a fresh entry" rule);
+    this test pins the toggling of the flag, while the explicit
+    transition is covered separately by
+    ``test_upsert_repository_resets_first_seen_date_on_restar``.
+    """
     db = _new_db()
     first_date = date(2026, 1, 1)
     db.upsert_repository(
@@ -390,12 +402,114 @@ def test_upsert_repository_in_watchlist_comes_from_parameter() -> None:
     )
     assert db.get_repository("owner/r")["in_watchlist"] == 0
 
-    # Re-star: flips back to 1 without losing the existing history.
+    # Re-star: per docs/SPEC.md §Watchlist lifecycle, this is a
+    # fresh entry — first_seen_date resets to today.
     db.upsert_repository(
         _repo_dict(full_name="owner/r"), TODAY, in_watchlist=True
     )
     assert db.get_repository("owner/r")["in_watchlist"] == 1
-    assert db.get_repository("owner/r")["first_seen_date"] == first_date.isoformat()
+    assert db.get_repository("owner/r")["first_seen_date"] == TODAY.isoformat()
+
+
+def test_upsert_repository_resets_first_seen_date_on_restar() -> None:
+    """Re-starring (in_watchlist 0→1 transition) resets
+    ``first_seen_date`` to today per ``docs/SPEC.md §Watchlist
+    lifecycle`` ("Re-starring (manually by the user) is a
+    fresh entry: in_watchlist = 1 again, first_seen_date
+    reset.").
+
+    Other transitions preserve ``first_seen_date`` (continuous
+    membership, unstar, re-upsert of an unstarred repo) — the
+    spec's intent is that the reset happens on a *re*-entry,
+    not on every observation. Pinned here so a future refactor
+    of the UPSERT SQL does not regress to the earlier
+    "only on first insert" / "preserve on every upsert"
+    interpretation, which would lock in the wrong audit
+    semantics.
+
+    The reset is implemented atomically inside the UPSERT
+    statement (a ``CASE`` on the existing ``in_watchlist``);
+    see the ``upsert_repository`` docstring for the rationale
+    against a Python-side SELECT-then-INSERT-or-UPDATE.
+    """
+    db = _new_db()
+    initial_date = date(2026, 1, 1)
+
+    # 1) Initial entry: in_watchlist 0→1 (no prior row).
+    db.upsert_repository(
+        _repo_dict(full_name="owner/r"),
+        initial_date,
+        in_watchlist=True,
+    )
+    assert db.get_repository("owner/r")["first_seen_date"] == "2026-01-01"
+
+    # 2) Continuous membership: in_watchlist 1→1. first_seen
+    # preserved, last_seen updated.
+    db.upsert_repository(
+        _repo_dict(full_name="owner/r"),
+        date(2026, 2, 1),
+        in_watchlist=True,
+    )
+    assert db.get_repository("owner/r")["first_seen_date"] == "2026-01-01"
+    assert db.get_repository("owner/r")["in_watchlist"] == 1
+
+    # 3) Unstar: in_watchlist 1→0. first_seen preserved
+    # (history is the audit anchor).
+    db.upsert_repository(
+        _repo_dict(full_name="owner/r"),
+        date(2026, 7, 1),
+        in_watchlist=False,
+    )
+    assert db.get_repository("owner/r")["first_seen_date"] == "2026-01-01"
+    assert db.get_repository("owner/r")["in_watchlist"] == 0
+
+    # 4) Re-star: in_watchlist 0→1. Per spec, this is a
+    # fresh entry — first_seen resets to today.
+    db.upsert_repository(
+        _repo_dict(full_name="owner/r"),
+        TODAY,
+        in_watchlist=True,
+    )
+    assert db.get_repository("owner/r")["first_seen_date"] == TODAY.isoformat()
+    assert db.get_repository("owner/r")["in_watchlist"] == 1
+
+    # 5) Continuous membership again: preserved, not reset a
+    # second time.
+    db.upsert_repository(
+        _repo_dict(full_name="owner/r"),
+        date(2026, 12, 1),
+        in_watchlist=True,
+    )
+    assert db.get_repository("owner/r")["first_seen_date"] == TODAY.isoformat()
+
+
+def test_upsert_repository_preserves_first_seen_on_zero_to_zero_upsert() -> None:
+    """An unstarred repo re-upserted with ``in_watchlist = 0``
+    does NOT reset ``first_seen_date`` — the spec's reset
+    rule is "re-starring", which is a 0→1 transition, not
+    a generic "any upsert".
+
+    This is a defensive pin: the SQL ``CASE`` checks
+    ``excluded.in_watchlist = 1`` (not just "in_watchlist
+    changed"), so a 0→0 upsert does not accidentally
+    trigger a reset.
+    """
+    db = _new_db()
+    db.upsert_repository(
+        _repo_dict(full_name="owner/r"),
+        date(2026, 1, 1),
+        in_watchlist=False,
+    )
+    assert db.get_repository("owner/r")["first_seen_date"] == "2026-01-01"
+
+    # Same in_watchlist flag, different date. No transition;
+    # first_seen preserved.
+    db.upsert_repository(
+        _repo_dict(full_name="owner/r"),
+        date(2026, 7, 1),
+        in_watchlist=False,
+    )
+    assert db.get_repository("owner/r")["first_seen_date"] == "2026-01-01"
 
 
 def test_upsert_repository_archived_and_disabled_coerce_bool_to_int() -> None:
@@ -667,11 +781,13 @@ def test_get_previous_snapshot_returns_none_for_unknown_repo() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_list_watchlist_returns_only_active_full_names_sorted() -> None:
+def test_list_watchlist_returns_only_active_full_names() -> None:
     """``list_watchlist`` returns the ``full_name`` of every row with
-    ``in_watchlist = 1``, sorted alphabetically for deterministic
-    output (the leaderboard dispatch in Analytics relies on a
-    stable order)."""
+    ``in_watchlist = 1``. Order is not part of the ticket's
+    contract (the ticket says only "returns all full_name with
+    in_watchlist = 1") — the test asserts on a set to stay
+    agnostic to the actual order, so a future refactor of the
+    underlying SQL (e.g. an index hint) does not break it."""
     db = _new_db()
     db.upsert_repository(
         _repo_dict(full_name="zeta/r"), TODAY, in_watchlist=True
@@ -683,7 +799,7 @@ def test_list_watchlist_returns_only_active_full_names_sorted() -> None:
         _repo_dict(full_name="mike/r"), TODAY, in_watchlist=False
     )
 
-    assert db.list_watchlist() == ["alpha/r", "zeta/r"]
+    assert set(db.list_watchlist()) == {"alpha/r", "zeta/r"}
 
 
 def test_list_watchlist_is_empty_when_nothing_active() -> None:
@@ -729,7 +845,7 @@ def test_writes_are_durable_across_database_instances(tmp_path: Path) -> None:
     reader = Database(target)
     assert reader.get_repository("owner/r") is not None
     assert reader.get_previous_snapshot("owner/r", before_date=date(2026, 8, 2)) is not None
-    assert reader.list_watchlist() == ["owner/r"]
+    assert set(reader.list_watchlist()) == {"owner/r"}
     topic_names = {
         r[0] for r in _conn(reader).execute("SELECT name FROM topics").fetchall()
     }
