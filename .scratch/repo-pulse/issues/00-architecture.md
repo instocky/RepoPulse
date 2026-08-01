@@ -64,6 +64,11 @@ mechanically by `tests/test_architecture.py`.
 - `charts` → `analytics` ❌ — Charts takes DTOs, not Analytics objects
 - `collector` → `analytics` ❌ — Collector writes raw, Analytics reads
 - `db` → `gh` ❌ — db is pure storage
+- `gh` → `collector` ❌ — gh is a leaf primitive (closes asymmetric gap from ticket 05; the original doctrine listed `db → gh` but not the symmetric `gh → db`, which let an accidental `from repo_pulse.db import X` slip past the enforcer in `gh/__init__.py`).
+- `gh` → `db` ❌ — gh is a leaf primitive
+- `gh` → `analytics` ❌ — gh is a leaf primitive
+- `gh` → `charts` ❌ — gh is a leaf primitive
+- `gh` → `web` ❌ — gh is a leaf primitive
 - `lock` → anything except `os` and `pathlib` ❌ — lock is a leaf primitive.
   The AST enforcer also permits `from __future__ import ...` (language-level
   feature, not a runtime dependency); the enforcer's test documents the

@@ -24,6 +24,16 @@ SRC_ROOT = REPO_ROOT / "src" / "repo_pulse"
 
 # Forbidden (source_layer, target_layer) pairs. Mirror of the matrix in
 # 00-architecture.md — if you change one, change the other.
+#
+# The `gh → {collector, db, analytics, charts, web}` entries pin the
+# gh layer as a leaf primitive: it can be read *by* the collector
+# (the collector's network direction) but must not import any
+# higher-layer module itself. Without these pairs, an accidental
+# `from repo_pulse.db import X` in `gh/__init__.py` would slip
+# past the enforcer — the original doctrine listed `db → gh` (db
+# may not import from gh) but not the symmetric `gh → db` (gh
+# may not import from db). The asymmetric version was an oversight;
+# ticket 05 (gh module) closes it.
 FORBIDDEN_PAIRS: frozenset[tuple[str, str]] = frozenset({
     ("web", "db"),
     ("web", "gh"),
@@ -34,6 +44,11 @@ FORBIDDEN_PAIRS: frozenset[tuple[str, str]] = frozenset({
     ("charts", "analytics"),
     ("collector", "analytics"),
     ("db", "gh"),
+    ("gh", "collector"),
+    ("gh", "db"),
+    ("gh", "analytics"),
+    ("gh", "charts"),
+    ("gh", "web"),
 })
 # All known top-level subpackages of `repo_pulse` (i.e. the layers). Used to
 # detect direct-submodule imports like `from repo_pulse import db` and
@@ -264,4 +279,23 @@ def test_enforcer_catches_lock_violation(tmp_path: Path) -> None:
     violations = _planted_violation(fake_pkg, "lock", "import sys\n")
     assert any("lock" in v and "'sys'" in v for v in violations), (
         "regression net (lock) failed; got: " + repr(violations)
+    )
+
+
+def test_enforcer_catches_gh_importing_db(tmp_path: Path) -> None:
+    """Regression net: the ``gh`` layer must not import from any
+    higher layer (collector / db / analytics / charts / web).
+
+    Closes the asymmetric gap in the original doctrine — the
+    enforcer used to forbid ``db → gh`` (db may not import gh)
+    but not ``gh → db`` (gh may not import db). Pinning this
+    with a planted violation so a future revert of the FORBIDDEN_PAIRS
+    list is caught at unit-test time, not at code-review time.
+    """
+    fake_pkg = tmp_path / "src" / "repo_pulse"
+    violations = _planted_violation(
+        fake_pkg, "gh", "from repo_pulse.db import conn\n"
+    )
+    assert any("'gh'" in v and "'db'" in v for v in violations), (
+        "regression net (gh -> db) failed; got: " + repr(violations)
     )
