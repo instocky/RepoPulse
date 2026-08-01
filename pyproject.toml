@@ -76,6 +76,10 @@ ignore = [
 [tool.mypy]
 python_version = "3.11"
 strict = true
+# `src/` is the package root (hatchling layout). Without `mypy_path` mypy
+# would treat `repo_pulse.config` as an untyped third-party module and
+# fall back to `Any`, masking real errors in the tests.
+mypy_path = "src"
 # CI invokes `mypy src/`, so the tests/ override is documentation + a guard
 # for a developer running `mypy` against the whole repo locally.
 [[tool.mypy.overrides]]
