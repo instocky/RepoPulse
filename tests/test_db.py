@@ -281,6 +281,34 @@ def test_database_close_is_idempotent() -> None:
     db.close()  # must not raise
 
 
+def test_database_rejects_non_memory_string_path() -> None:
+    """The ``str`` branch of the constructor is reserved for
+    the ``":memory:"`` test sentinel — any other ``str`` is
+    rejected with ``TypeError`` at construction time. Without
+    the guard, a stray ``Database("some/path")`` would silently
+    open a SQLite file at CWD-level and the bug would surface
+    later as "why is my test database at the project root?".
+    Pinned here so the contract (the docstring's "Either a
+    ``Path`` ... or the literal string ``\":memory:\"``") is
+    enforced at runtime, not just on paper.
+
+    ``Path`` inputs are accepted unchanged (a ``Path`` is never
+    equal to ``":memory:"``) — the second assertion pins that
+    the guard does not over-reach."""
+    with pytest.raises(TypeError, match="Database accepts Path or the literal ':memory:'"):
+        Database("not-memory.db")  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="Database accepts Path or the literal ':memory:'"):
+        Database("")  # type: ignore[arg-type]
+
+    # Sanity: ``Path`` still works (a Path is never equal to the
+    # sentinel, so the isinstance/str branch does not fire).
+    tmp = Path("scratch.db")
+    db = Database(tmp)
+    assert db is not None
+    db.close()
+
+
 def test_context_manager_closes_connection_on_exit() -> None:
     """The ``with`` block closes the connection on exit so a
     mid-body exception does not leak the underlying file

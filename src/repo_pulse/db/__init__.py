@@ -157,15 +157,29 @@ class Database:
         literal string ``":memory:"`` (tests). The string form is
         a SQLite convention for a private in-memory database; the
         spec calls it out so a test can spin up a fresh DB per
-        fixture without touching the filesystem. Any other string
-        is treated as a file path (delegated to ``sqlite3.connect``
-        which interprets the argument as a path on every
-        supported platform).
+        fixture without touching the filesystem. **No other
+        ``str`` is accepted** — a runtime ``TypeError`` is raised
+        in ``__init__`` if a ``str`` other than ``":memory:"`` is
+        passed, so a stringly-typed file path is impossible to
+        construct by accident. Wrap filesystem paths in
+        ``Path(...)`` at the call site.
     """
 
     __slots__ = ("_target", "_conn", "_closed")
 
     def __init__(self, path: Path | str) -> None:
+        # Runtime guard: the str branch is reserved for the
+        # ``":memory:"`` test sentinel. Without this check, a stray
+        # ``Database("some/path")`` would silently open a SQLite
+        # file at CWD-level — a debugging nightmare when the
+        # caller's intent was "this directory, this filename" but
+        # they forgot ``Path(...)``. The contract (this docstring)
+        # is the authority; this guard enforces it.
+        if isinstance(path, str) and path != _MEMORY_SENTINEL:
+            raise TypeError(
+                f"Database accepts Path or the literal ':memory:'; "
+                f"got str {path!r}. Wrap filesystem paths in Path(...)."
+            )
         self._target: Path | str = path
         self._conn: sqlite3.Connection = self._open_connection()
         # Tracks whether ``close()`` has already been called so
@@ -253,6 +267,16 @@ class Database:
             ``owner`` / ``name`` are missing they are inferred
             from the first ``/`` in ``full_name`` — the
             ``GET /user/starred`` payload sometimes omits them.
+
+            The ``dict[str, Any]`` shape is the db layer's
+            boundary contract, not an internal convenience.
+            Narrowing it to a ``RepoPayload`` dataclass would
+            push a Pydantic / dataclass dependency on every
+            caller; the Collector (ticket 08) is the right
+            layer to introduce that type, because it owns the
+            GitHub-payload normalization. This layer takes
+            the dict as-is and lets SQLite's column-level
+            type coercion enforce the schema.
         today:
             The "current" date the Collector is running for.
             Stored as the ISO format string ``YYYY-MM-DD``.
@@ -360,8 +384,15 @@ class Database:
             ``NOT NULL``); the rest are nullable. ``None`` is
             passed through as SQLite NULL — the GitHub API can
             return ``null`` for any of these and the
-            ``null_count`` / ``watchers_count`` fields are
-            explicitly nullable in the spec schema.
+            ``watchers_count`` / ``subscribers_count`` fields
+            are explicitly nullable in the spec schema.
+
+            Same ``dict[str, Any]`` boundary rationale as
+            ``upsert_repository``: the Collector (ticket 08) is
+            the layer that should introduce a ``SnapshotFields``
+            dataclass if one is wanted, because it owns the
+            GitHub-payload normalization. This layer takes the
+            dict and lets SQLite enforce the column types.
         """
         with self._transaction() as conn:
             conn.execute(
@@ -638,6 +669,15 @@ class Database:
         canonical parsing rule and matches the GitHub API
         documentation for the ``full_name`` shape
         (``"{owner}/{name}"``).
+
+        Intentional mirror of ``_coerce_name`` (suffix instead
+        of prefix). The shape duplication is shallow — two
+        lines per helper — and a parameterised ``_split_or``
+        helper would need a ``side: Literal["left", "right"]``
+        argument that reads worse than the two named helpers
+        at the call site (``upsert_repository`` calls them in
+        sequence). Kept separate; the cross-reference here is
+        for the next refactor to find them.
         """
         if "owner" in repo and repo["owner"] is not None:
             return str(repo["owner"])
@@ -651,7 +691,8 @@ class Database:
         Symmetric to ``_coerce_owner``: the GitHub API sometimes
         omits the standalone ``name`` field on the
         ``/user/starred`` payload but always populates
-        ``full_name``.
+        ``full_name``. See ``_coerce_owner`` for the rationale
+        against parameterising the two helpers into one.
         """
         if "name" in repo and repo["name"] is not None:
             return str(repo["name"])
