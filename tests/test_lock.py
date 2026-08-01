@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from repo_pulse.lock import Lock
+from repo_pulse.lock import Lock, _write_all
 
 # ---------------------------------------------------------------------------
 # Basic acquire/release cycle
@@ -268,3 +269,152 @@ def test_lock_directory_has_no_extraneous_files_after_acquire(
         assert lock_path.read_text(encoding="utf-8").strip() == str(os.getpid())
     finally:
         lock.release()
+
+
+# ---------------------------------------------------------------------------
+# _write_all — short-write loop on the staging file
+# ---------------------------------------------------------------------------
+
+
+# ``os.open`` defaults to text mode on Windows (which would silently
+# translate ``\n`` to ``\r\n`` in the bytes we hand it). The lock
+# layer's content is always ASCII decimal + ``\n``, so we need the
+# file open in binary mode for the test assertions to be byte-equal
+# to the input. ``os.O_BINARY`` exists on Windows only.
+_O_BINARY = getattr(os, "O_BINARY", 0)
+
+
+def _open_writable_binary(path: Path) -> int:
+    """Open ``path`` for writing in binary mode, cross-platform.
+
+    On POSIX, ``O_BINARY`` is 0 and the flags work as-is. On
+    Windows, ``os.open`` defaults to text mode unless ``O_BINARY``
+    is set; without it, a ``b"foo\nbar"`` payload comes back as
+    ``b"foo\r\nbar"`` and the byte-equality assertion in
+    ``test_write_all_*`` fires even though the helper is correct.
+    """
+    return os.open(path, os.O_CREAT | os.O_WRONLY | _O_BINARY, 0o644)
+
+
+def test_write_all_writes_every_byte_on_a_normal_call(tmp_path: Path) -> None:
+    """Smoke: a real ``os.write`` on a regular file returns the full
+    length, so ``_write_all`` calls ``os.write`` exactly once and the
+    file ends up with the full payload. This is the
+    everyday-case regression net for the helper.
+    """
+    payload = b"12345\n"
+    path = tmp_path / "normal_write.bin"
+    fd = _open_writable_binary(path)
+    try:
+        _write_all(fd, payload)
+    finally:
+        os.close(fd)
+    assert path.read_bytes() == payload
+
+
+def test_write_all_loops_on_short_writes(tmp_path: Path) -> None:
+    """The contract that the rest of ``acquire()`` depends on: when
+    ``os.write`` reports a short write, the helper loops until every
+    byte is on disk. Without the loop, a short write would leave a
+    truncated tmp file, ``os.replace`` would atomically publish the
+    truncation, and the next reader would treat the corrupt content
+    as "no holder" and steal the lock — the same
+    mutual-exclusion regression the ``tmp + rename`` scheme exists
+    to prevent.
+
+    The mock hands the file back one byte at a time and reports
+    "1 written" each time, so the helper has to call ``os.write``
+    exactly ``len(payload)`` times. If the loop ever bails early,
+    the final assertion on the file fails (the mock wrote fewer
+    bytes than the payload length).
+
+    ``real_write`` is captured *before* the patch so the mock can
+    call through to the genuine syscall to push the actual byte
+    onto the file — otherwise the file would stay empty regardless
+    of how well the loop worked, and the test would not actually
+    pin the contract.
+    """
+    payload = b"12345\n"
+    path = tmp_path / "short_writes.bin"
+    fd = _open_writable_binary(path)
+
+    real_write = os.write
+    calls: list[bytes] = []
+
+    def one_byte_at_a_time(_fd: int, data: bytes) -> int:
+        # Write the first byte of the requested data to the real
+        # file via the captured (un-patched) ``os.write``, then
+        # report "1 byte written" so the loop has to come back.
+        calls.append(bytes(data))
+        return real_write(_fd, data[:1])
+
+    try:
+        with patch("repo_pulse.lock.os.write", side_effect=one_byte_at_a_time):
+            _write_all(fd, payload)
+    finally:
+        os.close(fd)
+
+    # The loop called os.write once per byte of the payload. Each
+    # call returned 1; the loop kept going until the data view
+    # was empty. The first call had the full payload, the last
+    # had one byte.
+    assert len(calls) == len(payload)
+    assert calls[0] == payload
+    assert calls[-1] == payload[-1:]
+    # And the file got the full payload, byte by byte.
+    assert path.read_bytes() == payload
+
+
+def test_write_all_raises_when_os_write_returns_zero(tmp_path: Path) -> None:
+    """A zero-byte return from ``os.write`` on a regular file is a
+    filesystem-level failure (full disk, broken pipe surrogate,
+    whatever). ``_write_all`` must surface it as ``OSError`` so the
+    surrounding ``try/except`` in ``acquire()`` cleans up the
+    staging file and returns ``False`` — not silently publish a
+    zero-byte lock via the subsequent ``os.replace``.
+    """
+    path = tmp_path / "zero_write.bin"
+    fd = _open_writable_binary(path)
+    try:
+        with patch("repo_pulse.lock.os.write", return_value=0):
+            with pytest.raises(OSError, match="returned 0"):
+                _write_all(fd, b"12345\n")
+    finally:
+        os.close(fd)
+    # The file was opened but never written to; the helper raised
+    # before completing any write.
+    assert path.read_bytes() == b""
+
+
+def test_acquire_keeps_full_pid_even_if_os_write_short_writes(
+    tmp_path: Path,
+) -> None:
+    """End-to-end pin: with ``os.write`` mocked to return short
+    lengths, ``Lock.acquire()`` still produces a lock file whose
+    content is the *complete* PID. This is the regression that
+    motivated the ``_write_all`` helper — without the loop, the
+    ``os.replace`` would atomically publish whatever ``os.write``
+    managed to push, and the next process would see a truncated /
+    empty file and treat the lock as up for grabs.
+    """
+    lock_path = tmp_path / "short_write.lock"
+    lock = Lock(lock_path)
+    real_write = os.write
+
+    def short_writes(fd: int, data: bytes) -> int:
+        # Two bytes per call, regardless of how much we were asked
+        # for. ``_write_all`` has to keep calling.
+        return real_write(fd, data[:2])
+
+    # Capture the file content inside the ``with patch`` block —
+    # *before* ``release()`` unlinks the file in the test's
+    # ``finally``. Reading after release would FileNotFoundError on
+    # a normal-acquire path too.
+    with patch("repo_pulse.lock.os.write", side_effect=short_writes):
+        try:
+            assert lock.acquire() is True
+            captured = lock_path.read_bytes()
+        finally:
+            lock.release()
+
+    assert captured.strip() == str(os.getpid()).encode("utf-8")

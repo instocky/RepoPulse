@@ -37,6 +37,44 @@ __all__ = ["Lock"]
 _MIN_VALID_PID = 1
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    """Write every byte of ``data`` to ``fd``, looping on short writes.
+
+    ``os.write`` is documented to potentially return a value smaller
+    than ``len(data)`` — POSIX explicitly allows this when the call
+    is interrupted by a signal before all bytes are transferred, and
+    some non-regular filesystems (pipes, sockets under load) report
+    short writes under back-pressure. For a regular file on a local
+    filesystem this almost never happens in practice, but the lock
+    layer's correctness depends on the assumption that the file
+    published by ``os.replace`` is the *complete* PID, not a
+    prefix. A short write would leave a truncated tmp file; the
+    subsequent ``os.replace`` would atomically publish the
+    truncation; the next process reading the lock would treat the
+    corrupt content as "no holder" and steal the lock — the same
+    mutual-exclusion regression the ``tmp + rename`` scheme is
+    designed to prevent. So we loop until ``data`` is empty.
+
+    Raises ``OSError`` if ``os.write`` ever returns 0 (which on a
+    regular file means the fd is no longer writable — the
+    equivalent of a dead disk) so the caller's try/except can
+    clean up the staging file.
+    """
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, bytes(view))
+        if written == 0:
+            # Defensive: a regular file that reports 0 bytes
+            # written is broken at the OS level. Surface as an
+            # error so the surrounding try/except unlinks the tmp
+            # file and the caller treats ``acquire()`` as failed.
+            raise OSError("os.write returned 0; cannot complete write")
+        view = view[written:]
+
+
+
+
+
 class Lock:
     """A file-based run lock guarded by a PID-based liveness check.
 
@@ -168,7 +206,18 @@ class Lock:
                 0o644,
             )
             try:
-                os.write(fd, str(os.getpid()).encode("utf-8"))
+                # ``os.write`` is documented to potentially do a
+                # short write if interrupted by a signal before all
+                # bytes are transferred (POSIX) or on some
+                # non-regular filesystems. A short write would
+                # leave a truncated tmp file; ``os.replace`` would
+                # then atomically publish the truncation, and the
+                # next process reading the lock would treat the
+                # corrupt content as "no holder" and steal the
+                # lock — the same mutual-exclusion regression the
+                # ``tmp + rename`` scheme is supposed to prevent.
+                # ``_write_all`` loops until every byte is on disk.
+                _write_all(fd, str(os.getpid()).encode("utf-8"))
             finally:
                 os.close(fd)
             os.replace(tmp, self.path)
