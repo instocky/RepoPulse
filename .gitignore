@@ -3,6 +3,15 @@ notes.md
 .env
 tmp/
 
+# === Repo-Pulse runtime artefacts ===
+data/
+logs/
+reports/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # === Python ===
 __pycache__/
 *.py[cod]

@@ -1,0 +1,82 @@
+[project]
+name = "repo-pulse"
+version = "0.1.0"
+description = "Personal daily pulse monitor for starred GitHub repositories"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Repo-Pulse" },
+]
+keywords = ["github", "monitoring", "dashboard", "analytics"]
+
+# Direct dependencies. httpx is listed explicitly because it is imported
+# directly by the Collector — relying on a transitive via openai/litellm is
+# not safe for a fresh clone. See memory "httpx — explicit dep".
+dependencies = [
+    "httpx>=0.27,<1.0",          # GitHub REST client (collector/gh.py)
+    "typer>=0.12,<1.0",          # CLI entry point
+    "fastapi>=0.111,<1.0",       # web framework
+    "uvicorn[standard]>=0.30,<1.0",  # ASGI server
+    "jinja2>=3.1,<4.0",          # server-side templates
+    "python-dotenv>=1.0,<2.0",   # .env loader for config.py
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9.0",
+    "respx>=0.21,<1.0",          # httpx mock transport for gh tests
+    "ruff>=0.5,<1.0",            # linter / formatter
+]
+
+# NOTE: `[project.scripts]` is intentionally NOT declared here yet. The
+# typer-based `repo-pulse` CLI lives in ticket 11 (cli.py). Adding the
+# entry point before the module exists would generate a console-script
+# shim that fails with `ModuleNotFoundError: No module named
+# 'repo_pulse.cli'` on every invocation.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/repo_pulse"]
+
+# ---------------------------------------------------------------------------
+# Lint / format
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Keep the rule set conservative for the scaffold. The full lint policy
+# (including `RUF`, `SIM`, etc.) lands in a separate `chore: fix ruff
+# lint ...` commit alongside any test-file touch-ups, so this ticket
+# doesn't need to touch pre-existing test code.
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "E501",   # line length (handled by formatter)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B011"]  # `assert False` is fine in tests
+
+# ---------------------------------------------------------------------------
+# Test runner
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+# Allow `from __future__ import annotations` style hints even when the
+# referenced symbol is not importable at collection time (e.g. a future
+# layer not yet scaffolded). Pairs with the architecture enforcer.
+pythonpath = ["src"]
