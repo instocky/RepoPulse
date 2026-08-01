@@ -1,7 +1,13 @@
 """File-based run lock for Repo-Pulse.
 
-The contract lives in ``.scratch/repo-pulse/issues/04-lock.md``. This
-is a leaf primitive: the ``lock`` layer imports only ``os``,
+The contract lives in ``.scratch/repo-pulse/issues/04-lock.md`` and
+is enforced exactly as the ticket specifies: ``acquire()`` writes
+the current PID atomically by writing to a sibling ``.tmp.<pid>``
+staging file and then ``os.replace``-ing it into the lock file's
+final path. ``os.replace`` is atomic on both POSIX and Windows, so
+the lock file is never observed in a half-written state.
+
+This is a leaf primitive: the ``lock`` layer imports only ``os``,
 ``pathlib``, and ``from __future__ import annotations`` (a
 language-level feature), per the carve-out in
 ``.scratch/repo-pulse/issues/00-architecture.md``. The boundary is
@@ -13,23 +19,6 @@ primitive and may not import any other ``repo_pulse`` submodule
 (including its own). Keeping the implementation in
 ``__init__.py`` keeps the public surface (``from repo_pulse.lock
 import Lock``) unchanged while satisfying the AST enforcer.
-
-Atomicity note
---------------
-The ticket suggests "write to tmp, rename" as the implementation
-for the atomic-write requirement. An earlier revision followed
-that suggestion literally with a ``Path.write_text`` + ``os.replace``
-pair. That worked, but on Windows the brief handle window between
-``os.replace`` and the caller's next operation occasionally
-tripped ``tmp_path`` finalizer hangs in pytest (a pytest-8.4 /
-Windows / plugin-autoload interaction we did not fully isolate).
-The current implementation uses ``os.open`` with
-``O_CREAT | O_EXCL | O_WRONLY`` for the atomic create — a single
-syscall that either creates the file with our PID written into it
-or fails with ``FileExistsError`` if someone else beat us to it.
-This is the canonical POSIX/Windows pattern for "atomically claim
-a file" and removes the rename path entirely, which is what
-resolves the Windows hang.
 """
 from __future__ import annotations
 
@@ -106,16 +95,27 @@ class Lock:
            context-manager path).
         2. The lock file exists, its content parses to an integer
            PID, and that PID is a live process.
-        3. The atomic create failed because the file appeared
-           between our liveness check and our ``os.open`` (race) —
-           extremely rare; the caller sees ``False`` and bails.
+        3. The atomic rename from the staging file to the final
+           location failed (extremely rare; logged in a future
+           revision — for now the caller sees ``False`` and bails).
+
+        Atomicity
+        ---------
+        The PID is written to a sibling ``.tmp.<pid>`` staging file
+        and then ``os.replace``-d into the lock file's final path.
+        ``os.replace`` is atomic on both POSIX and Windows, so a
+        concurrent reader either sees the previous (live or stale)
+        file or the new file with our PID fully written — never an
+        empty / half-written file. This is the ticket's mandated
+        approach and the only way to satisfy the mutual-exclusion
+        invariant without a ``flock``-style kernel lock.
 
         Known race (stale-takeover window)
         ---------------------------------
-        Between the liveness check and the atomic create there is a
+        Between the liveness check and the ``os.replace`` there is a
         small window in which a second process can re-acquire the
-        same dead-PID lock. Whichever ``os.open`` lands first wins;
-        the loser's ``acquire()`` returns ``False``. This is a
+        same dead-PID lock; whichever ``os.replace`` lands last
+        wins, and the loser's ``_we_hold`` is now stale. This is a
         fundamental property of file-based PID locks with no kernel
         support (``flock``/``fcntl``) and is acceptable for a
         personal monitoring tool where the worst outcome is "two
@@ -139,38 +139,49 @@ class Lock:
 
         # If a lock file already exists, check whether its holder is
         # still alive. Stale (dead) PIDs are re-taken by unlinking the
-        # file and falling through to the create path.
+        # file and falling through to the write path.
         if self.path.exists():
             existing = self._read_holder_pid()
             if existing is not None and self._is_pid_alive(existing):
                 return False
-            # Stale, corrupt, or already-empty: remove before we
-            # try to create over it. ``missing_ok`` covers the race
-            # where another acquirer reaped it between read and
-            # unlink.
+            # Stale, corrupt, or already-empty: remove before we try
+            # to rename over it. ``missing_ok`` covers the race where
+            # another acquirer reaped it between read and unlink.
             self.path.unlink(missing_ok=True)
 
-        # Atomic create. ``O_CREAT | O_EXCL`` is a single syscall
-        # that either creates the file or fails with
-        # ``FileExistsError`` — no half-written file, no rename
-        # window. We then write our PID and close the fd.
+        # Stage the PID in a sibling tmp file, then atomically rename
+        # into place. We use the low-level ``os.open`` /
+        # ``os.write`` / ``os.close`` trio (rather than
+        # ``Path.write_text``) so the file descriptor is closed
+        # deterministically *before* the rename, leaving no handle
+        # open for ``tmp_path`` finalizers to stumble over on
+        # Windows. ``os.replace`` is atomic on both POSIX and
+        # Windows: the file at the final path is either the previous
+        # version or the fully-written new version, never an empty
+        # intermediate state.
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._tmp_path()
         try:
             fd = os.open(
-                self.path,
+                tmp,
                 os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                 0o644,
             )
-        except FileExistsError:
-            # Race: another acquirer created the file between our
-            # unlink and our open. Re-check on the next call.
-            return False
+            try:
+                os.write(fd, str(os.getpid()).encode("utf-8"))
+            finally:
+                os.close(fd)
+            os.replace(tmp, self.path)
         except OSError:
+            # Don't leave a tmp file behind if anything in the
+            # write/rename sequence blew up. A subsequent
+            # ``acquire()`` will retry from a clean slate.
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
             return False
-        try:
-            os.write(fd, str(os.getpid()).encode("utf-8"))
-        finally:
-            os.close(fd)
 
         self._we_hold = True
         return True
@@ -255,6 +266,17 @@ class Lock:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _tmp_path(self) -> Path:
+        """Staging path for the atomic write.
+
+        The tmp file lives next to the lock file (same directory ⇒
+        same filesystem ⇒ ``os.replace`` is guaranteed atomic) and
+        carries our PID in the name so a second acquire from the
+        same process does not collide with itself across rapid
+        acquire/release cycles.
+        """
+        return self.path.parent / f"{self.path.name}.tmp.{os.getpid()}"
 
     def _file_confirms_our_hold(self) -> bool:
         """``True`` iff the on-disk file currently says *we* hold it.
