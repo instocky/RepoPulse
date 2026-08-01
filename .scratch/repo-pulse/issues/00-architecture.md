@@ -69,6 +69,12 @@ mechanically by `tests/test_architecture.py`.
 - `gh` → `analytics` ❌ — gh is a leaf primitive
 - `gh` → `charts` ❌ — gh is a leaf primitive
 - `gh` → `web` ❌ — gh is a leaf primitive
+- `watchlist` → `collector` ❌ — watchlist is a leaf primitive (ticket 06; mirrors the `gh` block above — a pure function over GitHub-shaped dicts, no other `repo_pulse` submodule should be reachable from it).
+- `watchlist` → `db` ❌ — watchlist is a leaf primitive
+- `watchlist` → `analytics` ❌ — watchlist is a leaf primitive
+- `watchlist` → `charts` ❌ — watchlist is a leaf primitive
+- `watchlist` → `web` ❌ — watchlist is a leaf primitive
+- `watchlist` → `gh` ❌ — watchlist is a leaf primitive
 - `lock` → anything except `os` and `pathlib` ❌ — lock is a leaf primitive.
   The AST enforcer also permits `from __future__ import ...` (language-level
   feature, not a runtime dependency); the enforcer's test documents the

@@ -49,12 +49,29 @@ FORBIDDEN_PAIRS: frozenset[tuple[str, str]] = frozenset({
     ("gh", "analytics"),
     ("gh", "charts"),
     ("gh", "web"),
+    # ``watchlist`` is a leaf primitive (ticket 06): a pure function
+    # over GitHub-shaped dicts, no other ``repo_pulse`` submodule
+    # should be reachable from it. The set mirrors the ``gh``
+    # entries above — the same five layered modules
+    # (collector / db / analytics / charts / web) plus ``gh`` itself
+    # (a leaf may not import a peer leaf either; the gh doctrine
+    # is the precedent). The "leaf primitives don't import each
+    # other" rule does NOT extend to ``config`` / ``lock``: the
+    # gh doctrine treats those as leaves the same way, so the
+    # precedent is consistent.
+    ("watchlist", "collector"),
+    ("watchlist", "db"),
+    ("watchlist", "analytics"),
+    ("watchlist", "charts"),
+    ("watchlist", "web"),
+    ("watchlist", "gh"),
 })
 # All known top-level subpackages of `repo_pulse` (i.e. the layers). Used to
 # detect direct-submodule imports like `from repo_pulse import db` and
 # `from .. import db`, where the imported name is itself a layer.
 LAYERS: frozenset[str] = frozenset({
-    "collector", "db", "analytics", "charts", "web", "config", "lock", "gh",
+    "collector", "db", "analytics", "charts", "web",
+    "config", "lock", "gh", "watchlist",
 })
 # `lock` is a leaf primitive — only `os` and `pathlib` may be imported.
 # `__future__` is a Python-language feature, not a runtime dependency.
@@ -298,4 +315,21 @@ def test_enforcer_catches_gh_importing_db(tmp_path: Path) -> None:
     )
     assert any("'gh'" in v and "'db'" in v for v in violations), (
         "regression net (gh -> db) failed; got: " + repr(violations)
+    )
+
+
+def test_enforcer_catches_watchlist_importing_db(tmp_path: Path) -> None:
+    """Regression net: the ``watchlist`` layer must not import from any
+    other ``repo_pulse`` submodule — it is a leaf primitive, the same
+    shape as ``gh``. Closes the same asymmetric gap that ticket 05
+    closed for ``gh``: a future revert of the ``watchlist → …`` entries
+    in ``FORBIDDEN_PAIRS`` is caught at unit-test time, not at
+    code-review time.
+    """
+    fake_pkg = tmp_path / "src" / "repo_pulse"
+    violations = _planted_violation(
+        fake_pkg, "watchlist", "from repo_pulse.db import conn\n"
+    )
+    assert any("'watchlist'" in v and "'db'" in v for v in violations), (
+        "regression net (watchlist -> db) failed; got: " + repr(violations)
     )
