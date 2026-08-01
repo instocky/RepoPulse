@@ -168,6 +168,8 @@ def test_full_toml_overrides_every_tunable(
         "\n"
         "[viral]\nmin_absolute_delta = 200\nmin_relative_growth = 0.30\n"
         "\n"
+        "[web]\nhost = \"0.0.0.0\"\nport = 9000\n"
+        "\n"
         f"{_paths_section(tmp_path)}",
         encoding="utf-8",
     )
@@ -182,9 +184,8 @@ def test_full_toml_overrides_every_tunable(
     assert cfg.recent_months == 6
     assert cfg.min_absolute_delta == 200
     assert cfg.min_relative_growth == pytest.approx(0.30)
-    # web_* are not in the toml — dataclass defaults
-    assert cfg.web_host == "127.0.0.1"
-    assert cfg.web_port == 8000
+    assert cfg.web_host == "0.0.0.0"
+    assert cfg.web_port == 9000
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +311,123 @@ def test_non_numeric_string_in_toml_raises_config_error(
     )
 
     with pytest.raises(ConfigError, match="min_relative_growth"):
+        load_config(env_path=env, toml_path=toml)
+
+
+def test_web_section_in_toml_overrides_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[web]`` keys override the dataclass defaults for host and port.
+
+    The ticket contract says "config.toml values override dataclass
+    defaults" for every field on the ``Config`` dataclass, including
+    ``web_host`` and ``web_port``. A previous revision deferred this
+    to ticket 13 (web) and the loader hard-coded the defaults at the
+    call site, leaving the toml override silently ignored. This
+    test pins the contract: a deploy that wants the dashboard on
+    ``0.0.0.0:9000`` gets exactly that, no code change.
+    """
+    env = _env_with_token(tmp_path)
+    monkeypatch.delenv("BASIC_AUTH_USER", raising=False)
+    monkeypatch.delenv("BASIC_AUTH_PASS", raising=False)
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        f"[web]\nhost = \"0.0.0.0\"\nport = 9000\n{_paths_section(tmp_path)}",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(env_path=env, toml_path=toml)
+
+    assert cfg.web_host == "0.0.0.0"
+    assert cfg.web_port == 9000
+
+
+def test_web_section_partial_toml_keeps_unset_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A toml with only ``[web].port`` → port overridden, host keeps default.
+
+    Per-key override, not section-level. Same pattern as
+    ``test_partial_toml_overrides_only_listed`` for the other
+    sections.
+    """
+    env = _env_with_token(tmp_path)
+    monkeypatch.delenv("BASIC_AUTH_USER", raising=False)
+    monkeypatch.delenv("BASIC_AUTH_PASS", raising=False)
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        f"[web]\nport = 9001\n{_paths_section(tmp_path)}",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(env_path=env, toml_path=toml)
+
+    assert cfg.web_port == 9001
+    assert cfg.web_host == "127.0.0.1"  # default
+
+
+def test_non_string_web_host_raises_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``host = 127001`` (int) → ``ConfigError`` instead of silent ``str()``.
+
+    The dot-collapsed int is a common toml authoring mistake. We
+    reject it rather than letting ``str(127001)`` produce a
+    nonsensical bind address.
+    """
+    env = _env_with_token(tmp_path)
+    monkeypatch.delenv("BASIC_AUTH_USER", raising=False)
+    monkeypatch.delenv("BASIC_AUTH_PASS", raising=False)
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        f"[web]\nhost = 127001\n{_paths_section(tmp_path)}",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="'host'"):
+        load_config(env_path=env, toml_path=toml)
+
+
+def test_non_dict_section_raises_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``paths = 1`` (wrong shape) → ``ConfigError``, not ``AttributeError``.
+
+    A previous revision called ``paths.get(...)`` directly without
+    checking the section was a dict; ``int`` has no ``.get`` and
+    the user got a raw traceback. The contract is "every load
+    failure is a ``ConfigError``" — pin it.
+
+    Note: ``paths = 1`` alone is valid toml (no ``[paths]`` table
+    collides), so the parser accepts it and the guard fires on
+    the loader side. We do NOT combine ``paths = 1`` with a
+    ``[paths]`` table — that would be a toml syntax error
+    (overwriting a value), which is a different code path.
+    """
+    env = _env_with_token(tmp_path)
+    monkeypatch.delenv("BASIC_AUTH_USER", raising=False)
+    monkeypatch.delenv("BASIC_AUTH_PASS", raising=False)
+    toml = tmp_path / "config.toml"
+    toml.write_text("paths = 1\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="\\[paths\\]"):
+        load_config(env_path=env, toml_path=toml)
+
+
+def test_non_dict_web_section_raises_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``web = \"0.0.0.0:8000\"`` (string, not a table) → ``ConfigError``.
+
+    Same guard, applied to the new ``[web]`` section.
+    """
+    env = _env_with_token(tmp_path)
+    monkeypatch.delenv("BASIC_AUTH_USER", raising=False)
+    monkeypatch.delenv("BASIC_AUTH_PASS", raising=False)
+    toml = tmp_path / "config.toml"
+    toml.write_text("web = \"0.0.0.0:8000\"\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="\\[web\\]"):
         load_config(env_path=env, toml_path=toml)
 
 

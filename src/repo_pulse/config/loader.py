@@ -87,12 +87,11 @@ class Config:
         snapshot. Set via ``config.toml [viral].min_relative_growth``.
         Default: 0.20 (20 %).
     web_host:
-        Dashboard bind address. Default: ``"127.0.0.1"``. Not yet
-        exposed in ``config.toml``; the dataclass default is the
-        contract for ticket 13 (web).
+        Dashboard bind address. Set via ``config.toml [web].host``.
+        Default: ``"127.0.0.1"``.
     web_port:
-        Dashboard bind port. Default: 8000. Same future-toml caveat
-        as ``web_host``.
+        Dashboard bind port. Set via ``config.toml [web].port``.
+        Default: 8000.
     """
 
     github_token: str
@@ -152,9 +151,10 @@ def load_config(
 
     # `or {}` guards against a toml section that is explicitly `section = {}`,
     # which tomllib parses as an empty dict, but defends against odd shapes.
-    paths = toml_data.get("paths") or {}
-    filter_ = toml_data.get("filter") or {}
-    viral = toml_data.get("viral") or {}
+    paths = _get_section(toml_data, "paths")
+    filter_ = _get_section(toml_data, "filter")
+    viral = _get_section(toml_data, "viral")
+    web = _get_section(toml_data, "web")
 
     data_dir = _coerce_path(paths.get("data_dir", "data"))
     reports_dir = _coerce_path(paths.get("reports_dir", "reports"))
@@ -175,8 +175,8 @@ def load_config(
         min_relative_growth=_coerce_float(
             viral.get("min_relative_growth", 0.20), "min_relative_growth"
         ),
-        # web_host / web_port take the dataclass defaults — they are not
-        # exposed in config.toml yet (deferred to ticket 13: web).
+        web_host=_coerce_str(web.get("host", "127.0.0.1"), "host"),
+        web_port=_coerce_int(web.get("port", 8000), "port"),
     )
 
 
@@ -233,6 +233,41 @@ def _load_toml(toml_path: Path | None) -> dict[str, Any]:
 def _coerce_path(value: Any) -> Path:
     """Coerce a toml value to a ``Path`` (via ``str()``)."""
     return Path(str(value))
+
+
+def _coerce_str(value: Any, name: str) -> str:
+    """Coerce a toml value to ``str``.
+
+    A bool or number here is almost certainly a toml authoring
+    mistake (e.g. ``host = 127001`` losing the dots), so we
+    reject non-strings with a clear error rather than letting
+    ``str(value)`` silently stringify them.
+    """
+    if isinstance(value, str):
+        return value
+    raise ConfigError(
+        f"config.toml: {name!r} must be a string, got {type(value).__name__}"
+    )
+
+
+def _get_section(toml_data: dict[str, Any], name: str) -> dict[str, Any]:
+    """Return a toml section as ``dict``, or ``{}`` if absent.
+
+    Raises ``ConfigError`` when the section is present but is not
+    a dict (e.g. ``paths = 1``). Without this guard, ``.get()``
+    on a non-dict section surfaces as a raw ``AttributeError``,
+    breaking the contract that every load failure is a
+    ``ConfigError``.
+    """
+    section = toml_data.get(name)
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise ConfigError(
+            f"config.toml: [{name}] must be a section (table), "
+            f"got {type(section).__name__}"
+        )
+    return section
 
 
 def _coerce_int(value: Any, name: str) -> int:
