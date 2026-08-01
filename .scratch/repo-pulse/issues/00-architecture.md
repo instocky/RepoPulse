@@ -64,7 +64,11 @@ mechanically by `tests/test_architecture.py`.
 - `charts` → `analytics` ❌ — Charts takes DTOs, not Analytics objects
 - `collector` → `analytics` ❌ — Collector writes raw, Analytics reads
 - `db` → `gh` ❌ — db is pure storage
-- `lock` → anything except `os` and `pathlib` ❌ — lock is a leaf primitive
+- `lock` → anything except `os` and `pathlib` ❌ — lock is a leaf primitive.
+  The AST enforcer also permits `from __future__ import ...` (language-level
+  feature, not a runtime dependency); the enforcer's test documents the
+  rationale. Update the doctrine and the enforcer together if more carve-outs
+  are ever needed.
 
 The allowed direction is strictly downward in the diagram. A lower layer
 imports a higher layer only to satisfy type hints for the *boundary*
